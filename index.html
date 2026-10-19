@@ -2,6 +2,9 @@
 <html lang="es-CL">
 <head>
 <meta charset="UTF-8">
+<!-- Seguridad: la app no puede hacer conexiones de red ni cargar recursos externos; los datos no salen del dispositivo -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0f766e">
 <title>Presupuesto Personal</title>
@@ -429,7 +432,7 @@
     </div>
     <div class="card">
       <h2>Datos</h2>
-      <p class="note" style="margin-top:-6px">Los datos se guardan solo en este navegador (localStorage). Exporta un respaldo JSON periódicamente.</p>
+      <p class="note" style="margin-top:-6px">Los datos se guardan solo en este navegador (localStorage). Exporta un respaldo periódicamente: por defecto se cifra con contraseña (AES-256). Si olvidas la contraseña, el respaldo no se puede recuperar.</p>
       <div class="actions">
         <button class="btn primary" id="exportJson">Exportar respaldo (JSON)</button>
         <button class="btn" id="importJsonBtn">Importar respaldo (JSON)</button>
@@ -1103,26 +1106,95 @@
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
   }
+  // Cifrado de respaldos: AES-GCM 256 con clave derivada por PBKDF2-SHA256
+  const KDF_ITER = 600000;
+  const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const cryptoOk = () => !!(window.crypto && crypto.subtle);
+  async function deriveKey(password, salt, iter) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+  async function encryptBackup(obj, password) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(password, salt, KDF_ITER);
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+    return { app: 'presupuesto-personal', format: 'encrypted-v1', cipher: 'AES-GCM-256', kdf: 'PBKDF2-SHA256', iterations: KDF_ITER, salt: b64(salt), iv: b64(iv), data: b64(data) };
+  }
+  async function decryptBackup(env, password) {
+    const key = await deriveKey(password, unb64(env.salt), Number(env.iterations) || KDF_ITER);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(env.iv) }, key, unb64(env.data));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+  const isEncrypted = d => d && d.format === 'encrypted-v1' && d.salt && d.iv && d.data;
+
   $('#exportJson').addEventListener('click', () => {
-    download(`presupuesto-respaldo-${today()}.json`, JSON.stringify(state, null, 2), 'application/json');
-    toast('Respaldo exportado');
+    if (!cryptoOk()) {
+      toast('Este navegador no permite cifrar; abre la app desde su dirección https');
+      return;
+    }
+    openDialog('Exportar respaldo cifrado', `
+      <p class="note" style="margin:0">El archivo quedará protegido con esta contraseña. <b>Si la olvidas, no se puede recuperar.</b></p>
+      <label class="field">Contraseña (mínimo 8 caracteres) <input type="password" name="pw" minlength="8" autocomplete="new-password" required></label>
+      <label class="field">Repetir contraseña <input type="password" name="pw2" autocomplete="new-password" required></label>
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px;font-weight:400">
+        <input type="checkbox" name="plain" style="width:auto;min-height:auto"> Exportar sin cifrar (no recomendado)</label>`, form => {
+      const plain = form.elements.plain.checked;
+      if (plain) {
+        download(`presupuesto-respaldo-${today()}-SIN-CIFRAR.json`, JSON.stringify(state, null, 2), 'application/json');
+        toast('Respaldo exportado sin cifrar');
+        return;
+      }
+      const pw = form.elements.pw.value;
+      if (pw.length < 8) { toast('La contraseña debe tener al menos 8 caracteres'); return false; }
+      if (pw !== form.elements.pw2.value) { toast('Las contraseñas no coinciden'); return false; }
+      toast('Cifrando respaldo…');
+      encryptBackup(state, pw)
+        .then(env => {
+          download(`presupuesto-respaldo-${today()}.json`, JSON.stringify(env), 'application/json');
+          toast('Respaldo cifrado exportado 🔒');
+        })
+        .catch(() => toast('No se pudo cifrar el respaldo'));
+    }, 'Exportar');
+    // Al marcar "sin cifrar", las contraseñas dejan de ser obligatorias
+    const f = $('#dlgForm');
+    f.elements.plain.addEventListener('change', e => {
+      ['pw', 'pw2'].forEach(n => { f.elements[n].required = !e.target.checked; f.elements[n].disabled = e.target.checked; });
+    });
   });
   $('#importJsonBtn').addEventListener('click', () => $('#importFile').click());
   $('#importFile').addEventListener('change', async e => {
     const file = e.target.files[0];
     e.target.value = '';
     if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      if (!data || typeof data !== 'object' || (!Array.isArray(data.movements) && !Array.isArray(data.categories))) throw new Error('formato');
-      const incoming = normalize(data);
-      confirmDialog('Importar respaldo',
-        `Se reemplazarán todos los datos actuales por los del archivo (${incoming.movements.length} movimientos, ${incoming.categories.length} categorías, ${incoming.debts.length} deudas). ¿Continuar?`,
-        () => { state = incoming; save(); applyTheme(); renderAll(); toast('Respaldo importado'); }, 'Importar');
-    } catch (err) {
-      toast('Archivo inválido: no es un respaldo de esta app');
-    }
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch (err) { toast('Archivo inválido: no es un respaldo de esta app'); return; }
+    if (isEncrypted(data)) askImportPassword(data);
+    else confirmImport(data);
   });
+  function confirmImport(data) {
+    if (!data || typeof data !== 'object' || (!Array.isArray(data.movements) && !Array.isArray(data.categories))) {
+      toast('Archivo inválido: no es un respaldo de esta app');
+      return;
+    }
+    const incoming = normalize(data);
+    confirmDialog('Importar respaldo',
+      `Se reemplazarán todos los datos actuales por los del archivo (${incoming.movements.length} movimientos, ${incoming.categories.length} categorías, ${incoming.debts.length} deudas). ¿Continuar?`,
+      () => { state = incoming; save(); applyTheme(); renderAll(); toast('Respaldo importado'); }, 'Importar');
+  }
+  function askImportPassword(env) {
+    if (!cryptoOk()) { toast('Este navegador no permite descifrar; abre la app desde su dirección https'); return; }
+    openDialog('Respaldo cifrado 🔒', `
+      <label class="field">Contraseña del respaldo <input type="password" name="pw" autocomplete="current-password" required></label>`, form => {
+      const pw = form.elements.pw.value;
+      toast('Descifrando…');
+      decryptBackup(env, pw)
+        .then(confirmImport)
+        .catch(() => { toast('Contraseña incorrecta o archivo dañado'); });
+    }, 'Descifrar');
+  }
   $('#exportCsv').addEventListener('click', () => {
     const onlyMonth = $('#csvMonthOnly').checked;
     const movs = (onlyMonth ? monthMovs() : state.movements).slice().sort((a, b) => a.date.localeCompare(b.date));

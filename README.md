@@ -20,6 +20,10 @@ App web de presupuesto personal en español (Chile), en un solo archivo `index.h
 - **Categorías y datos:** agrega, renombra, cambia color o borra categorías (los movimientos se reasignan). Exporta/importa respaldo JSON y exporta movimientos a CSV (separador `;`, se abre directo en Excel).
 - **Tema:** botón 🌓 alterna automático / claro / oscuro.
 
-## Tus datos
+## Tus datos y seguridad
 
-Todo se guarda en el `localStorage` de tu navegador: nada sale de tu equipo. Si borras los datos del navegador o cambias de dispositivo, se pierden, así que **exporta un respaldo JSON periódicamente** e impórtalo en el otro equipo.
+- Todo se guarda en el `localStorage` de tu navegador. El código publicado es público, pero **tus cifras nunca se suben** a ningún lado.
+- La página incluye una política de seguridad (CSP) que **bloquea toda conexión de red** y cualquier recurso externo, así que la app no puede enviar datos fuera de tu dispositivo.
+- **Respaldos cifrados:** "Exportar respaldo" pide una contraseña y cifra el archivo con AES-256-GCM (clave derivada con PBKDF2-SHA256, 600.000 iteraciones). Al importarlo se pide la misma contraseña. **Si la olvidas, el respaldo no se puede recuperar.** Existe la opción de exportar sin cifrar, no recomendada.
+- Cada navegador o dispositivo tiene sus propios datos: para pasarlos de uno a otro, exporta el respaldo en uno e impórtalo en el otro.
+- Recomendaciones: bloqueo con PIN/biometría en tus dispositivos, verificación en dos pasos (2FA) en GitHub y no compartir respaldos por chat o correo.
